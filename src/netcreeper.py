@@ -2,9 +2,8 @@
 from scapy.all import *
 from netfilterqueue import NetfilterQueue
 
-true_ttl_value = 0
-true_window_size = 0
-initial_handshake_done = False
+verdict_given = False
+info =  {} # {IP_Addrs : [ttl]}
 
 FIN = 0x01
 SYN = 0x02
@@ -17,23 +16,40 @@ CWR = 0x80
 
 def inspect(packet):
     pkt = IP(packet.get_payload())
+    global info
+    global verdict_given
+
+    source_ip = str(pkt['IP'].src)
+    ttl = pkt['IP'].ttl
+    
     if pkt.haslayer(TCP):
         F = pkt['TCP'].flags
-        if (F & SYN) and  (F & ACK) and not initial_handshake_done:
-            true_ttl_value = pkt['IP'].ttl
-            initial_handhshake_done = True
-            print "Initial handshake detected"
-            print "True ttl: ", true_ttl_value
+        if (F & SYN) and  (F & ACK) and (source_ip not in info): 
+            info.update({source_ip: [ttl, 0]})
+            print "Initial Handshake detected. IP: %s, Suspicious TTL: %d, True TTL:%d" %(source_ip, ttl, info[source_ip][0])
             packet.accept()
+            verdict_given = True
 
-        if ((F & FIN) and (F & PSH) and (F & ACK)) or (F & RST):
-            print pkt['IP'].ttl
-            if (pkt['IP'].ttl - true_ttl_value >=1):
-                print "suspicious packet detected"
+        elif (F & FIN)  and (source_ip in info):# and (F & PSH) and (F & ACK)) or (F & RST)) and (source_ip in info):# and initial_handshake_done:
+            if (ttl - info[source_ip][0] >= 1 or ttl - info[source_ip][0] <= -1):
+                print "Dropping suspicious FIN packet detected. IP: %s, Supicious TTL: %d, True TTL:%d" %(source_ip, ttl, info[source_ip][0])
                 packet.drop()
-    else:
-        print "No TCP layer"
-    packet.accept()
+                verdict_given = True
+            else:
+                packet.accept()
+        elif (F & RST) and (source_ip in info):
+            if (ttl - info[source_ip][0] >= 1  or ttl - info[source_ip][0] <= -1):
+                print "Dropping suspicious RST packet detected. IP: %s, Suspicious TTL: %d, True TTL:%d" %(source_ip, ttl, info[source_ip][0])
+                packet.drop()
+                verdict_given = True
+            else:
+                print "Deleting stream. IP: %s, This TTL: %d, True TTL:%d" %(source_ip, ttl, info[source_ip][0])
+                del info[source_ip]
+                packet.accept()
+                verdict_given = True
+
+    if not verdict_given:
+        packet.accept()
 
 nfqueue = NetfilterQueue()
 nfqueue.bind(1, inspect) 
@@ -41,4 +57,5 @@ try:
     print "Netcreeper running..."
     nfqueue.run()
 except KeyboardInterrupt:
+    print info
     pass
